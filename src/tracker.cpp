@@ -1,0 +1,169 @@
+
+#include <math.h>
+#include "tracker.h"
+#include <string>
+
+using namespace std;
+
+
+float RotMat[3][3] = {1,0,0,0,0,1,0,-1,0};
+
+
+FeatureTracker::FeatureTracker() : m_hRange(m_hranges)
+{
+	m_hranges[0] = 0;
+	m_hranges[1] = 180;
+	m_hsize = 16;
+}
+FeatureTracker::~FeatureTracker()
+{
+
+}
+
+void FeatureTracker::init(int vmin, int vmax, int smin, int frameType)
+{
+	m_vmin = vmin;
+	m_vmax = vmax;
+	m_smin = smin;
+
+
+	if (frameType == FRAMESIZE_640X480)
+	{
+		m_fx = 534.97;
+		m_fy = 535.40;
+		m_cx = 317.34;
+		m_cy = 241.71;
+		m_u = 0;
+		m_v = 0;
+	}
+	else if (frameType == FRAMESIZE_320X240)
+	{
+		m_fx = 534.97/2;
+		m_fy = 535.40/2;
+		m_cx = 317.34/2;
+		m_cy = 241.71/2;
+		m_u = 0;
+		m_v = 0;
+
+	}
+}
+
+bool FeatureTracker::setInitialROI(const Rect& rect, const Mat& img)
+{
+	Mat hsv, mask, hue;
+
+	cvtColor(img, hsv, COLOR_BGR2HSV);
+
+
+	inRange(hsv, Scalar(0, m_smin, MIN(m_vmin, m_vmax)), Scalar(180, 256, MAX(m_vmin, m_vmax)), mask);
+	int ch[] = { 0, 0 };
+	hue.create(hsv.size(), hsv.depth());
+	mixChannels(&hsv, 1, &hue, 1, ch, 1);
+
+	Mat roi(hue, rect), maskroi(mask, rect);
+	calcHist(&roi, 1, 0, maskroi, m_hist, 1, &m_hsize, &m_hRange);
+	normalize(m_hist, m_hist, 0, 255, CV_MINMAX);
+	m_trackWindow = rect;
+
+	return true;
+}
+
+bool FeatureTracker::track(const Mat& img, float& angle, Rect& targetRect, Point& center)
+{
+	bool bTrack = true;
+
+	Mat hsv, mask, hue, backproj;
+	angle = 0;
+
+	cvtColor(img, hsv, COLOR_BGR2HSV);
+
+	inRange(hsv, Scalar(0, m_smin, MIN(m_vmin, m_vmax)), Scalar(180, 256, MAX(m_vmin, m_vmax)), mask);
+	int ch[] = { 0, 0 };
+	hue.create(hsv.size(), hsv.depth());
+	mixChannels(&hsv, 1, &hue, 1, ch, 1);
+
+	calcBackProject(&hue, 1, 0, m_hist, backproj, &m_hRange);
+	backproj &= mask;
+	RotatedRect trackBox = CamShift(backproj, m_trackWindow, TermCriteria(CV_TERMCRIT_EPS | CV_TERMCRIT_ITER, 10, 1));
+
+	targetRect = trackBox.boundingRect();
+	if (m_trackWindow.area() <= 1)
+	{
+		int cols = backproj.cols, rows = backproj.rows, r = (MIN(cols, rows) + 5) / 6;
+		m_trackWindow = Rect(m_trackWindow.x - r, m_trackWindow.y - r,
+		m_trackWindow.x + r, m_trackWindow.y + r) & Rect(0, 0, cols, rows);
+	}
+
+	center.x = trackBox.center.x;
+	center.y = trackBox.center.y;
+
+	m_u = (trackBox.center.x - m_cx)/m_fx;
+	m_v = (trackBox.center.y - m_cy)/m_fy;
+
+	float camvec[3] = {m_u, m_v, 1};
+
+
+
+	float xw = RotMat[0][0] * camvec[0] + RotMat[0][1] * camvec[1] + RotMat[0][2] * camvec[2];
+	float yw = RotMat[1][0] * camvec[0] + RotMat[1][1] * camvec[1] + RotMat[1][2] * camvec[2];
+	float zw = RotMat[2][0] * camvec[0] + RotMat[2][1] * camvec[1] + RotMat[2][2] * camvec[2];
+
+	angle = -atan2(xw, yw)*180/3.141592;
+
+	return bTrack;
+}
+
+MyFeatureDetector::MyFeatureDetector()
+{
+}
+MyFeatureDetector::~MyFeatureDetector()
+{
+}
+
+bool MyFeatureDetector::init(const string& cascadename)
+{
+	if (m_cascade.empty())
+	{
+		cout << "load file .. " << cascadename << endl;
+		if (!m_cascade.load(cascadename))
+		{
+			cout << cascadename.c_str() <<  endl;
+			cerr << "ERROR: Could not load classifier cascade" << endl;
+			return false;
+		}
+	}
+	return true;
+}
+
+bool MyFeatureDetector::detect(vector<Rect>& ROI, const Mat& img, double scale)
+{
+	if (img.empty()) 
+		return false;
+
+	const static Scalar colors[] = { CV_RGB(0, 0, 255),
+		CV_RGB(0, 128, 255),
+		CV_RGB(0, 255, 255),
+		CV_RGB(0, 255, 0),
+		CV_RGB(255, 128, 0),
+		CV_RGB(255, 255, 0),
+		CV_RGB(255, 0, 0),
+		CV_RGB(255, 0, 255) };
+
+	Mat gray, smallImg(cvRound(img.rows / scale), cvRound(img.cols / scale), CV_8UC1);
+
+	cvtColor(img, gray, CV_BGR2GRAY);
+	resize(gray, smallImg, smallImg.size(), 0, 0, INTER_LINEAR);
+	equalizeHist(smallImg, smallImg);
+
+	printf("detecting..\n"); 
+	m_cascade.detectMultiScale(smallImg, ROI, 1.1, 25, 0
+		| CV_HAAR_FIND_BIGGEST_OBJECT
+		| CV_HAAR_DO_ROUGH_SEARCH
+		| CV_HAAR_SCALE_IMAGE, Size(30, 30));
+
+	if (ROI.size() == 0)
+		return false;
+	else
+		return true;
+}
+

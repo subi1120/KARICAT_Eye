@@ -1,0 +1,288 @@
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <iostream>
+#include "MsgDef.h"
+#include "utilities.h"
+#include "tracker.h"
+#include "opencv2/opencv.hpp"
+#include "XtionProCamera.h"
+#include "kai2/kai.h"
+#include "MPEGCoder.h"
+
+
+
+
+using namespace cv;
+using namespace MPEGLib;
+using namespace std;
+
+Mat imageMat;
+Mat copyMat;
+Mat depthMat;
+bool bDepthFrame = false;
+
+
+uint8_t encodedImage[100000];
+char dataBuffer[100000];
+
+
+struct MsgHandler
+{
+	virtual void onMessage(kaiMsg& msg) = 0;
+};
+
+class MySock : public kaiSocket
+{
+public:
+	MySock(unsigned short port, const string& remoteIP, unsigned short remotePort) : m_handler(NULL)
+	{
+		kaiSocket::create(false, kaiON_MESSAGE);
+		bind(port);
+		setBlockingMode(kaiNON_BLOCKING_SOCKET);
+		
+		m_remoteAddr.sin_port = htons(remotePort);
+		m_remoteAddr.sin_addr.s_addr = inet_addr(remoteIP.c_str());
+		m_remoteAddr.sin_family = AF_INET;
+	}
+	~MySock(){}
+
+	void sendMessage(const kaiMsg& msg)
+	{
+		sendTo(msg, &m_remoteAddr);
+	}
+
+
+	virtual void onMessage(kaiMsg& msg) 
+	{	
+		if (m_handler)
+			m_handler->onMessage(msg);
+	}
+
+	void registerMsgHandler(MsgHandler* handler)
+	{
+		m_handler = handler;
+	}
+	
+
+
+	private:
+	sockaddr_in m_remoteAddr;
+	MsgHandler* m_handler;
+	
+};
+
+
+
+class MyFrameCallback : public VideoModule::FrameCallback, public MsgHandler
+{
+public:
+	MyFrameCallback() : m_bInit(false), m_file(NULL), m_bRegistered(false)
+	{string addr;
+		unsigned short port;
+		printf("video open..\n");
+		
+	}
+
+	~MyFrameCallback()
+	{
+	} 
+	
+
+	void init()
+	{	
+		
+		m_sock = new MySock(6150, "192.168.0.3", 6250);	
+		m_sock->registerMsgHandler(this);
+			
+
+		sendRequestRegisterMsg();
+	}
+
+	void update()
+	{
+		m_aliveTick++;
+		if (m_aliveTick == 10)
+		{
+			kaiMsg sendmsg;
+			char buffer[20];
+			sendmsg.setBuffer(buffer);
+			sendmsg.begin();
+			sendmsg << m_nodeid;
+			sendmsg.id(MSG_ID_NC_REQ_ALIVE);
+			sendmsg.end();
+			m_sock->sendMessage(sendmsg);
+			m_aliveTick = 0;
+		}
+		
+		string addr;
+		unsigned short port;
+		m_sock->recvFrom(addr, port);
+	}
+	
+
+	void initEncoder()
+	{
+		int res = m_encoder.initialize(1, 320,240);
+		if (res == 0)
+		{
+			m_bInit = true;
+		}
+		else
+		{
+			cout<<"encoder initialization error.."<<endl;
+		}
+	}
+
+	void endEncoder()
+	{
+		if (m_bInit)
+		{
+			m_bInit = false;
+			//uint8_t encode[] = {0,0,1,0xb7};
+			//fwrite(encode, 1, sizeof(encode), m_file);
+			//fclose(m_file);
+			m_file = NULL;
+			
+			m_encoder.end();
+		}
+	}
+	virtual void onNewFrame(char* pFrame, int width, int height, int type)
+	{
+		
+		if (type == VideoModule::eFrameType_RGB)
+		{	
+			if (m_bInit && m_bRegistered)
+			{
+				int size = m_encoder.EncodeImage(encodedImage, (const uint8_t*)pFrame);
+				
+				if (size > 0)
+				{	
+					unsigned char id = 0 ;
+					kaiMsg msg;
+					msg.setBuffer(dataBuffer);
+					msg.begin();		
+					msg << id;
+					msg.writeData(encodedImage, size);			
+					msg.id(MSG_ID_NC_NOTI_CAMERA_VALUE);
+				
+					msg.end();
+					
+					m_sock->sendMessage(msg);	
+									
+					//fwrite(encodedImage, 1, size, m_file);
+				}
+			}
+
+			
+		}
+		else 
+		{
+			bDepthFrame = true;
+			depthMat = Mat(cvSize(width, height), CV_16UC1, pFrame);
+		}
+
+
+	}
+	
+	void onMessage(kaiMsg& msg)
+	{
+		switch(msg.id())
+		{
+			case MSG_ID_CN_NOTI_SAY_HELLO:
+			{
+				sendRequestRegisterMsg();
+			}
+			break;
+
+			case MSG_ID_CN_ACK_REQ_REGISTER:
+			{	
+				msg.begin();
+				msg >>m_nodeid;
+				initEncoder();
+				m_bRegistered = true;
+				m_aliveTick = 0;
+			}
+			break;
+			
+			case MSG_ID_CN_ACK_REQ_ALIVE:
+			{
+			}
+			break;
+		}
+	}
+
+private:
+
+	void sendRequestRegisterMsg()
+	{
+		// send request register message.. string addr;
+		unsigned short port;
+		string name = "chaser";
+		int size = name.size();
+		kaiMsg sendmsg;
+		char buffer[100];
+		sendmsg.setBuffer(buffer);
+		sendmsg.begin();
+		sendmsg << size;
+		sendmsg.writeData(name.c_str(), size);
+		sendmsg.id(MSG_ID_NC_REQ_REGISTER);
+		sendmsg.end();
+
+		m_sock->sendMessage(sendmsg);
+	}	
+
+
+
+private:
+	//VideoWriter videoWriter;
+	MPEGEncoder m_encoder;
+	FILE* m_file;
+	MySock* m_sock;
+	bool m_bInit;
+	bool m_bRegistered;
+	int m_aliveTick;
+	unsigned char m_nodeid;
+	
+};
+
+
+int main()
+{
+
+	MPEGLib::InitailizeLibrary();
+
+	std::string str = "hello world3 ";
+	std::cout << str << std::endl;
+
+	MyFeatureDetector detector;
+	detector.init("cs_cascade.xml");
+
+	/*XtionProCamera camera;
+	MyFrameCallback callback;
+	callback.init();
+	camera.initialize(VideoModule::eFrameType_Depth | VideoModule::eFrameType_RGB, 320, 240);
+	camera.start(VideoModule::eFrameType_Depth | VideoModule::eFrameType_RGB);
+	camera.registerFrameCallback(&callback, VideoModule::eFrameType_Depth);
+	camera.registerFrameCallback(&callback, VideoModule::eFrameType_RGB);
+	*/
+	
+	
+	
+	while(!wasKeyboardHit())
+	{
+		//if (bDepthFrame)	
+	//		std::cout << "depth : " << depthMat.at<unsigned short>(Point(120, 160)) << std::endl;
+		usleep(30000);
+		
+	//	callback.update();
+		
+	
+	}
+	
+//	callback.endEncoder();
+//	camera.stop(VideoModule::eFrameType_Depth);	
+	
+	printf("save..\n");
+
+}
