@@ -98,6 +98,8 @@ bool CameraSensor::init(int type, int frameType)
 		 printf("camera initialization error..");
 	 }
 
+	int a = 0;
+
 
 
 
